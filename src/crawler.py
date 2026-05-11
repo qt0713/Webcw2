@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -8,6 +9,12 @@ from bs4 import BeautifulSoup
 
 class CrawlerError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class PageContent:
+    text: str
+    next_url: Optional[str]
 
 
 def _sleep_if_needed(
@@ -49,6 +56,50 @@ def _fetch_with_retries(
     raise CrawlerError(f"Request failed for {url}")
 
 
+def _extract_page_text(soup: BeautifulSoup) -> str:
+    content_selectors = [
+        "div.quote",
+        "div.tags-box",
+        "div.container",
+        "main",
+        "article",
+        "body",
+    ]
+
+    chunks = []
+    seen = set()
+
+    for selector in content_selectors:
+        for node in soup.select(selector):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            text = node.get_text(" ", strip=True)
+            if text:
+                chunks.append(text)
+
+    if chunks:
+        return " ".join(chunks)
+
+    return soup.get_text(" ", strip=True)
+
+
+def _extract_next_url(soup: BeautifulSoup, current_url: str) -> Optional[str]:
+    next_selectors = [
+        "li.next a",
+        "a[rel='next']",
+        "nav a.next",
+        "a.next",
+    ]
+
+    for selector in next_selectors:
+        next_link = soup.select_one(selector)
+        if next_link and next_link.get("href"):
+            return urljoin(current_url, next_link["href"])
+
+    return None
+
+
 def crawl_site(
     start_url: str,
     politeness_seconds: float = 6.0,
@@ -82,12 +133,11 @@ def crawl_site(
             sleep_func=sleep_func,
         )
         soup = BeautifulSoup(response.text, "html.parser")
-        pages[current_url] = soup.get_text(" ", strip=True)
-
-        next_link = soup.select_one("li.next a")
-        if next_link and next_link.get("href"):
-            current_url = urljoin(current_url, next_link["href"])
-        else:
-            current_url = None
+        page_content = PageContent(
+            text=_extract_page_text(soup),
+            next_url=_extract_next_url(soup, current_url),
+        )
+        pages[current_url] = page_content.text
+        current_url = page_content.next_url
 
     return pages
